@@ -20,12 +20,13 @@
 #define INITIAL_THREAD_NUMBER 0
 
 // Threads' table
-static ut_slot* threads_table = NULL;
-static unsigned int threads_counter = 0;
-static int threads_table_size = 0;
+static ut_slot* threadsTable = NULL;
+static unsigned int threadsCounter = 0;
+static int threadsTableSize = 0;
 
 // variables to control the context switching
 static ucontext_t mainThread;
+static volatile tid_t prevThreadNum = 0;
 static volatile tid_t currThreadNum = 0;
 
 int ut_init(int tab_size) {
@@ -36,10 +37,10 @@ int ut_init(int tab_size) {
     }
 
     // Allocating space for the ut_slot array
-    threads_table_size = tab_size;
-    threads_table = (ut_slot*)calloc(tab_size, sizeof(ut_slot));
+    threadsTableSize = tab_size;
+    threadsTable = (ut_slot*)calloc(tab_size, sizeof(ut_slot));
 
-    if (NULL == threads_table) {
+    if (NULL == threadsTable) {
         fprintf(stderr, "Error: Failed to allocate thread's table");
         return SYS_ERR;
     }
@@ -49,7 +50,7 @@ int ut_init(int tab_size) {
 
 tid_t ut_spawn_thread(void (*func)(int), int arg) {
     char * new_thread_stack; // The stack of the new ut_slot
-    tid_t current_thread_number = threads_counter; // The thread id of the new ut_slot
+    tid_t current_thread_number = threadsCounter; // The thread id of the new ut_slot
 
     if (NULL == func) {
         fprintf(stderr, "Error - Bad input: function parameter for the thread is not valid");
@@ -57,13 +58,13 @@ tid_t ut_spawn_thread(void (*func)(int), int arg) {
     }
 
     // ut_spawn_thread was called before ut_init
-    if (NULL == threads_table) {
+    if (NULL == threadsTable) {
         fprintf(stderr, "Error: Thread's table is not initialized. Make sure you have called \"ut_init()\" prior to spawining your threads");
         return SYS_ERR;
     }
 
     // Checking if there is a room for a new thread to spawn
-    if (threads_counter >= threads_table_size) {
+    if (threadsCounter >= threadsTableSize) {
         printf("Error: No more room for new threads\n");
         return TAB_FULL;
     }
@@ -72,37 +73,37 @@ tid_t ut_spawn_thread(void (*func)(int), int arg) {
     new_thread_stack = (char*)calloc(STACKSIZE, sizeof(char));
 
     // Allocating new ut_slot
-    threads_table[threads_counter] = (ut_slot)malloc(sizeof(ut_slot_t));
+    threadsTable[threadsCounter] = (ut_slot)malloc(sizeof(ut_slot_t));
 
-    if (NULL == threads_table[threads_counter]) {
+    if (NULL == threadsTable[threadsCounter]) {
         fprintf(stderr, "Error: Failed to allocate new thread");
         return SYS_ERR;
     }
 
     // Getting a new context for the new thread
-    if (getcontext(&(threads_table[threads_counter]->uc)) == -1) {
+    if (getcontext(&(threadsTable[threadsCounter]->uc)) == -1) {
         perror(GENEREAL_ERROR_MESSAGE);
         exit(SIG_HNDL_EXC_RET_VAL);
     }
 
     // Setting up the new_ucontext's data
-    threads_table[threads_counter]->uc.uc_stack.ss_sp = new_thread_stack;
-    threads_table[threads_counter]->uc.uc_stack.ss_size = STACKSIZE * sizeof(char);
-    threads_table[threads_counter]->uc.uc_stack.ss_flags = SS_FLAGS;
-    threads_table[threads_counter]->uc.uc_link = &mainThread;
+    threadsTable[threadsCounter]->uc.uc_stack.ss_sp = new_thread_stack;
+    threadsTable[threadsCounter]->uc.uc_stack.ss_size = STACKSIZE * sizeof(char);
+    threadsTable[threadsCounter]->uc.uc_stack.ss_flags = SS_FLAGS;
+    threadsTable[threadsCounter]->uc.uc_link = &mainThread;
 
     // Setting up the new ut_slot
-    threads_table[threads_counter]->stack = new_thread_stack;
-    threads_table[threads_counter]->vtime = INITIAL_VTIME;
-    threads_table[threads_counter]->func = func;
-    threads_table[threads_counter]->arg = arg;
-    (void)makecontext(&(threads_table[threads_counter]->uc),
-        (void(*)(void))threads_table[threads_counter]->func, ARGS_COUNT,
-        threads_table[threads_counter]->arg);
+    threadsTable[threadsCounter]->stack = new_thread_stack;
+    threadsTable[threadsCounter]->vtime = INITIAL_VTIME;
+    threadsTable[threadsCounter]->func = func;
+    threadsTable[threadsCounter]->arg = arg;
+    (void)makecontext(&(threadsTable[threadsCounter]->uc),
+        (void(*)(void))threadsTable[threadsCounter]->func, ARGS_COUNT,
+        threadsTable[threadsCounter]->arg);
 
     // Informing about spawning a new thread
-    printf("Info: new thread table record in (tid: %d)\n", threads_counter);
-    threads_counter++;
+    printf("Info: new thread table record in (tid: %d)\n", threadsCounter);
+    threadsCounter++;
 
     // Return the tid
     return current_thread_number;
@@ -113,15 +114,16 @@ void handler(int signal) {
 	switch (signal){
         // If Sigalrm received
         case SIGALRM:
+        	prevThreadNum = currThreadNum;
 
             // Restart the alarm signal
             alarm(QUANTOM);
 
             // Getting the next tid in line
-            currThreadNum = ((currThreadNum + 1) % threads_counter);
+            currThreadNum = ((prevThreadNum + 1) % threadsCounter);
 
-            // Swap context to the follwing thread on the array (circular)
-            if (SYS_ERR == swapcontext(&(threads_table[currThreadNum]->uc), &(threads_table[(currThreadNum + 1) % threads_counter]->uc))) {
+            // Swap context to the following thread on the array (circular)
+            if (SYS_ERR == swapcontext(&(threadsTable[prevThreadNum]->uc), &(threadsTable[currThreadNum]->uc))) {
                 perror(GENEREAL_ERROR_MESSAGE);
                 exit(SIG_HNDL_EXC_RET_VAL);
             }
@@ -129,7 +131,7 @@ void handler(int signal) {
 
         case SIGVTALRM:
             // Adding to the total time of thread running
-            threads_table[currThreadNum]->vtime += INTERVAL_TIMER_MILLISECONDS;
+            threadsTable[prevThreadNum]->vtime += INTERVAL_TIMER_MILLISECONDS;
         break;
 	}
 }
@@ -161,10 +163,10 @@ int ut_start(void) {
 
     // Starting to switch threads
     alarm(QUANTOM);
-    currThreadNum = INITIAL_THREAD_NUMBER;
-    threads_table[FIRST_CELL_INDEX]->vtime += INTERVAL_TIMER_MILLISECONDS;
+    prevThreadNum = INITIAL_THREAD_NUMBER;
+    threadsTable[FIRST_CELL_INDEX]->vtime += INTERVAL_TIMER_MILLISECONDS;
 
-	if (SYS_ERR == swapcontext(&mainThread, &(threads_table[FIRST_CELL_INDEX]->uc))) {
+	if (SYS_ERR == swapcontext(&mainThread, &(threadsTable[FIRST_CELL_INDEX]->uc))) {
         perror(GENEREAL_ERROR_MESSAGE);
         exit(SIG_HNDL_EXC_RET_VAL);
     }
@@ -176,11 +178,11 @@ int ut_start(void) {
 unsigned long ut_get_vtime(tid_t tid) {
 
     // Validating the received tid
-    if (tid > threads_counter) {
+    if (tid > threadsCounter) {
         printf("Thread does not exist!\n");
         return SYS_ERR;
     }
 
     // Returning the total time that the thread run
-    return threads_table[tid]->vtime;
+    return threadsTable[tid]->vtime;
 }
